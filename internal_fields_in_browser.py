@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Version: 1.5_beta
+# Version: 1.5_beta2
 # See github page to report issues or to contribute:
 # https://github.com/hssm/anki-addons
 
@@ -48,8 +48,15 @@ _cardColumns = [('cid', "Card ID"),
 # Later on, we combine all custom columns for easier iteration.
 _customColumns = []
 
-# Dictionary of field names to figure out if we can handle a column
-_allFields = {}
+# Dictionary of field names indexed by "type" name. Used to figure out if
+# the requested column is a note field.
+_fieldTypes = {}
+
+# Dictionary of dictionaries to get field order for field for model.
+# { mid -> {fldName -> pos}}
+# Build this dictionary once to avoid finding the right order for every
+# single row when sorting.
+_modelFieldPos = {}
 
 def myColumnData(self, index):
     returned = origColumnData(self, index)
@@ -61,8 +68,8 @@ def myColumnData(self, index):
     c = self.getCard(index)
     n = c.note()
     
-    if type in _allFields:
-        field = _allFields[type]
+    if type in _fieldTypes:
+        field = _fieldTypes[type]
         if field in c.note().keys():
             return c.note()[field]
     elif type == "cfirst":
@@ -137,8 +144,8 @@ def my_order(self, order):
     type = self.col.conf['sortType']
     sort = None
         
-    if type in _allFields:
-        fldName = _allFields[type]
+    if type in _fieldTypes:
+        fldName = _fieldTypes[type]
         sort = "(select valueForField(mid, flds, '%s') from notes where id = c.nid)" % fldName
     elif type == "cfirst":
         sort = "(select min(id) from revlog where cid = c.id)"
@@ -191,22 +198,26 @@ def my_order(self, order):
 
 def mySetupColumns(self):
     global _customColumns
-    global _allFields
+    global _fieldTypes
+    global _modelFieldPos
 
     # Create a new SQL function that we can use in our queries.
     mw.col.db._db.create_function("valueForField", 3, valueForField)
 
-    # Build a list of all (note) fields in the collection. No dupes.
-    fields = []
+    fieldColumns = []
     for model in mw.col.models.all():
+        mid = model['id']
+        _modelFieldPos[mid] = {}
         for field in model['flds']:
-            type = "_field_"+field['name']
             name = field['name']
-            if (type, name) not in fields:
-                fields.append((type, name))
-                _allFields[type] = name
-    
-    _customColumns = _goodColumns + _noteColumns + _cardColumns + fields
+            ord = field['ord']
+            type = "_field_"+name #prefix to avoid potential clashes
+            _modelFieldPos[model['id']][name] = ord
+            if (type, name) not in fieldColumns:
+                fieldColumns.append((type, name))
+                _fieldTypes[type] = name
+
+    _customColumns = _goodColumns + _noteColumns + _cardColumns + fieldColumns
     self.columns.extend(_customColumns)
 
 def myOnHeaderContext(self, pos):
@@ -231,7 +242,7 @@ def myOnHeaderContext(self, pos):
             addCheckableAction(nm, type, name)
         elif item in _cardColumns:
             addCheckableAction(cm, type, name)
-        elif item[0] in _allFields:
+        elif item[0] in _fieldTypes:
             addCheckableAction(fm, type, name)
         else:
             addCheckableAction(m, type, name)
@@ -295,10 +306,11 @@ def myCloseEvent(self, evt):
 
 def valueForField(mid, flds, fldName):
     fields = anki.utils.splitFields(flds)
-    model = mw.col.models.get(mid)
-    for f in model['flds']:
-        if f['name'] == fldName:
-            return fields[f['ord']]
+    field = _modelFieldPos.get(mid, None)
+    if field:
+        index = field.get(fldName, None)
+        if index:
+            return fields[index]
 
 
 DataModel.columnData = myColumnData
