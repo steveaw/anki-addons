@@ -1,230 +1,242 @@
-import time
+# -*- coding: utf-8 -*-
+# Version: 0.1alpha1
+# See github page to report issues or to contribute:
+# https://github.com/hssm/anki-addons
+from operator import  itemgetter
 
 from aqt import *
-from anki.hooks import addHook
+from aqt.browser import DataModel, Browser
+from anki.hooks import wrap, addHook, runHook
+from anki.find import Finder
 
-# Some useful columns to have
-_usefulColumns = [('cfirst', "First review"),
-                ('clast', "Last review"),
-                ('cavtime', "Time (Average)"),
-                ('ctottime', "Time (Total)"),
-                ('ntags', "Tags")]
+CONF_KEY = 'advbrowse_activeCols'
 
+origColumnData = DataModel.columnData
+origOrder = Finder._order
 
+# CustomColumn objects maintained by this add-on. Indexed by
+# CustomColumn.type.
+_customTypes = {}
 
-# Dictionary of field names indexed by "type" name. Used to figure out if
-# the requested column is a note field.
-_fieldTypes = {}
+# Context menu items
+_contextItems = []
 
-# Dictionary of dictionaries to get position for field in model.
-# { mid -> {fldName -> pos}}
-# We build this dictionary once to avoid needlessly finding the field order
-# for every single row when sorting. It's significantly faster that way.
-_modelFieldPos = {}
-
-
-# def myColumnData(self, index):
-#     if type in _fieldTypes:
-#         field = _fieldTypes[type]
-#         if field in c.note().keys():
-#             return c.note()[field]
-
-
-
-# def my_order(self, order):
-         
-#     if type in _fieldTypes:
-#         fldName = _fieldTypes[type]
-#         sort = "(select valueForField(mid, flds, '%s') from notes where id = c.nid)" % fldName
- 
-
-# def mySetupColumns(self):
-#     global _customColumns
-#     global _fieldTypes
-#     global _modelFieldPos
-# 
-#     fieldColumns = []
-#     for model in mw.col.models.all():
-#         # For some reason, some mids return as unicode, so convert to int
-#         mid = int(model['id'])
-#         _modelFieldPos[mid] = {}
-#         for field in model['flds']:
-#             name = field['name']
-#             ord = field['ord']
-#             type = "_field_"+name #prefix to avoid potential clashes
-#             _modelFieldPos[mid][name] = ord
-#             if (type, name) not in fieldColumns:
-#                 fieldColumns.append((type, name))
-#                 _fieldTypes[type] = name
-# 
-#     _customColumns = _usefulColumns  + fieldColumns
-#     self.columns.extend(_customColumns)
-
-
-# def myOnHeaderContext(self, pos):
-#     gpos = self.form.tableView.mapToGlobal(pos)
-#     
-#     m = QMenu()
-#     # Sub-menu containing every uniquely named field in the collection.
-#     fm = QMenu("Fields")
-#     
-#     def addCheckableAction(menu, type, name):
-#         a = menu.addAction(name)
-#         a.setCheckable(True)
-#         a.setChecked(type in self.model.activeCols)
-#         a.connect(a, SIGNAL("toggled(bool)"),
-#                   lambda b, t=type: self.toggleField(t))
-#     
-#     for item in self.columns:
-#         type, name = item
-#         if type in _fieldTypes:
-#             addCheckableAction(fm, type, name)
-#         else:
-#             addCheckableAction(m, type, name)
-#     
-#     m.addMenu(fm)
-#     m.exec_(gpos)
-
-
-
-def valueForField(mid, flds, fldName):
+# Context menu groups
+_contextGroups = []
+    
+class CustomColumn:
     """
-    SQLite function to get the value of a field, given a field name.
+    A custom browser column.
     
-    mid is the model id. The model contains the definition of a note,
-    including the names of all fields.
+    type = Internally used key to identify the column.   
     
-    flds contains the text of all fields, delimited by the character
-    "x1f". We split this and index into it according to a precomputed
-    index for the model (mid) and field name (fldName).
+    name = Name of column, visible to the user.
     
-    fldName is the field name we are after.
+    onData = Function that returns an SQL query as a string. The query
+    must return a scalar result. The function must be defined with
+    three parameters: (card, note, type).
+    E.g.:
+    def myColumnOnData(card, note, type):
+        return mw.col.db.scalar(
+            "select min(id) from revlog where cid = ?", card.id)
+    
+    onSort = Optional function that returns an SQL query as a string to
+    sort the column. This query will be used as the "where" clause of
+    a larger query.
+    E.g.:
+    def myColumnOnSort():
+        return "(select min(id) from revlog where cid = c.id)"
+        
+    In this query, you have the names "c" and "n" to refer to cards and
+    notes, respectively. See find.py::_query for reference.
     """
+    def __init__(self, type, name, onData, onSort=None):
+        self.type = type
+        self.name = name
+        self.onData = onData
+        self.onSort = onSort
 
-    index = _modelFieldPos.get(mid).get(fldName, None)
-    if index:
-        fieldsList = flds.split("\x1f", index)
-        return fieldsList[index]
+
+class ContextColumnGroup:
+    """
+    """
+    def __init__(self, name):
+        self.name = name
+        self.items = []
+    
+    def addItem(self, item):
+        self.items.append(item)
+
+    
+def addCustomColumn(cc, group=None):
+    """Add a CustomColumn object to be maintained by this add-on."""
+    
+    global _customTypes
+    _customTypes[cc.type] = cc
+
+
+def myDataModel__init__(self, browser):
+    """Load any custom columns that were saved in a previous session."""
+    
+    # First, we make sure those columns are still valid. If not, we ignore
+    # them. This is to guard against the event that we remove or rename a
+    # column (i.e., a note field). Also make sure the sortType is set to a
+    # valid column.
+    
+    sortType = mw.col.conf['sortType']
+    validSortType = False
+    custCols = mw.col.conf.get(CONF_KEY, [])
+    
+    for custCol in custCols:
+        for type in _customTypes:
+            if custCol == type and custCol not in self.activeCols:
+                self.activeCols.append(custCol)
+            if sortType == type:
+                validSortType = True
+    
+    if not validSortType:
+        mw.col.conf['sortType'] = 'noteCrt'
+
+
+# Context menu -------
+
+def mySetupColumns(self):
+    """Build a list of candidate columns. We extend the internal
+    self.columns list with our custom types."""
+    
+    for type in _customTypes:
+        self.columns.append((_customTypes[type].type, _customTypes[type].name))
+    self.columns.sort(key=itemgetter(1))
+        
+def addContextItem(item):
+    global _contextItems
+    _contextItems.append(item)
+
+    
+def myOnHeaderContext(self, pos):
+    global _contextItems
+    
+    gpos = self.form.tableView.mapToGlobal(pos)
+    main = QMenu()
+    
+    # Let clients decide what columns to include before we build the menu
+    _contextItems = []
+    runHook("advBrowserBuildContext")
+      
+    
+    def addCheckableAction(menu, type, name):
+        a = menu.addAction(name)
+        a.setCheckable(True)
+        a.setChecked(type in self.model.activeCols)
+        a.connect(a, SIGNAL("toggled(bool)"),
+                  lambda b, t=type: self.toggleField(t))
+
+    # Do the built-in ones normally. Ensure the ones we maintain aren't
+    # included.
+    for item in self.columns:
+        type, name = item
+        if type not in _customTypes:
+            addCheckableAction(main, type, name)
+    
+
+    # For some reason, sub menus aren't added if we don't keep a
+    # reference to them until exec, so keep them in this list.
+    tmp = []
+    # Ours might have sub-menus. Recursively add each item/group.
+    def addToSubgroup(menu, items):
+        for item in items:
+            # TODO: this isn't great :(
+            if isinstance(item, ContextColumnGroup):
+                sub = QMenu(item.name)
+                tmp.append(sub)
+                menu.addMenu(sub)
+                addToSubgroup(sub, item.items)
+            else:
+                addCheckableAction(menu, item.type, item.name)
+
+    addToSubgroup(main, _contextItems)
+    main.exec_(gpos)
+
+# --------
+
+
+def myCloseEvent(self, evt):
+    """Remove our columns from self.model.activeCols when closing.
+    Otherwise, Anki would save them to the equivalent in the collection
+    conf, which might have ill effects elsewhere. We save our custom
+    types in a custom conf item instead."""
+    
+    #sortType = mw.col.conf['sortType']
+    # TODO: should we avoid saving the sortType? We will continue to do
+    # so unless a problem with doing so becomes evident.
+        
+    customCols = []
+    origCols = []
+    
+    for col in self.model.activeCols:
+        isOrig = True
+        for type in _customTypes:
+            if col == type:
+                customCols.append(col)
+                isOrig = False
+                break
+        if isOrig:
+            origCols.append(col)
+
+    self.model.activeCols = origCols
+    mw.col.conf[CONF_KEY] = customCols
+    
+    
+def myColumnData(self, index):
+    # Try to handle built-in Anki column
+    returned = origColumnData(self, index)
+    if returned:
+        return returned
+    
+    # If Anki can't handle it, it must be one of ours.
+    
+    col = index.column()
+    type = self.columnType(col)
+    c = self.getCard(index)
+    n = c.note()
+    
+    if type in _customTypes:
+        return _customTypes[type].onData(c, n, type)
+
+def myOrder(self, order):
+    # This is pulled from the original _order() -----------------------
+    if not order:
+        return "", False
+    elif order is not True:
+        # custom order string provided
+        return " order by " + order, False
+    # use deck default
+    type = self.col.conf['sortType']
+    sort = None
+    # -----------------------------------------------------------------
+    
+    if type in _customTypes:
+        sort = _customTypes[type].onSort()
+    
+    if not sort:
+        # If we couldn't sort it, it must be a built-in column. Handle
+        # it internally.
+        return origOrder(self, order)
+    
+    # This is also from the original _order()
+    return " order by " + sort, self.col.conf['sortBackwards']
+
+
+
+DataModel.__init__ = wrap(DataModel.__init__, myDataModel__init__)
+DataModel.columnData = myColumnData
+Browser.setupColumns = wrap(Browser.setupColumns, mySetupColumns)
+Browser.onHeaderContext = myOnHeaderContext
+Browser.closeEvent = wrap(Browser.closeEvent, myCloseEvent, "before")
+Finder._order = myOrder
 
 def onLoad():
-    # Create a new SQL function that we can use in our queries.
-    mw.col.db._db.create_function("valueForField", 3, valueForField)
-
-def onAdvBrowserLoad():
-    print "advanced_browser.py -> onAdvBrowserLoad"
+    runHook("advBrowserLoad")
     
-        
-    global _fieldTypes
-    global _modelFieldPos
-
-    for model in mw.col.models.all():
-        # For some reason, some mids return as unicode, so convert to int
-        mid = int(model['id'])
-        _modelFieldPos[mid] = {}
-        for field in model['flds']:
-            name = field['name']
-            ord = field['ord']
-            type = "_field_"+name #prefix to avoid potential clashes
-            _modelFieldPos[mid][name] = ord
-            if type not in _fieldTypes:
-                _fieldTypes[type] = name
-                # TODO: Add CustomColumn here!
-                
-    createCustomColumns()
-    
-
-def createCustomColumns():
-    from advanced_browser_core import CustomColumn, addCustomColumn
-    
-    # First review
-    def cFirstOnData(c, n, t):
-        first = mw.col.db.scalar(
-            "select min(id) from revlog where cid = ?", c.id)
-        if first:
-            return time.strftime("%Y-%m-%d", time.localtime(first / 1000))
-   
-    addCustomColumn(CustomColumn(
-        key = 'cfirst',
-        name = 'First Review',
-        onData = cFirstOnData,
-        onSort = lambda: "(select min(id) from revlog where cid = c.id)"
-    ))
-    #---------
-    
-    # Last review
-    def cLastOnData(c, n, t):
-        last = mw.col.db.scalar(
-            "select max(id) from revlog where cid = ?", c.id)
-        if last:
-            return time.strftime("%Y-%m-%d", time.localtime(last / 1000))
-   
-    addCustomColumn(CustomColumn(
-        key = 'clast',
-        name = 'Last Review',
-        onData = cLastOnData,
-        onSort = lambda: "(select max(id) from revlog where cid = c.id)"
-    ))
-    #---------
-    
-    # Average time
-    def cAvgtimeOnData(c, n, t):
-        avgtime = mw.col.db.scalar(
-            "select avg(time) from revlog where cid = ?", c.id)
-        if avgtime:
-            return str(round(avgtime / 1000, 1)) + "s"
-    
-    addCustomColumn(CustomColumn(
-        key = 'cavgtime',
-        name = 'Time (Average)',
-        onData = cAvgtimeOnData,
-        onSort = lambda: "(select avg(time) from revlog where cid = c.id)"
-    ))    
-    #---------
-
-    # Total time
-    def cTottimeOnDAta(c, n, t):
-        tottime = mw.col.db.scalar(
-            "select sum(time) from revlog where cid = ?", c.id)
-        if tottime:
-            return str(round(tottime / 1000, 1)) + "s"
-
-    addCustomColumn(CustomColumn(
-        key = 'ctottime',
-        name = 'Time (Total)',
-        onData = cTottimeOnDAta,
-        onSort = lambda: "(select sum(time) from revlog where cid = c.id)"
-    ))
-    #---------
-    
-    # Tags
-    addCustomColumn(CustomColumn(
-        key = 'ntags',
-        name = 'Tags',
-        onData = lambda c, n, t: " ".join(str(tag) for tag in n.tags),
-        onSort = lambda: "n.tags"
-    ))
-    #---------
-    
-    # Note fields
-    def fldOnData(c, n, t):
-        field = _fieldTypes[t]
-        if field in c.note().keys():
-            return c.note()[field]
-
-    def fldOnSort(type):
-        if type in _fieldTypes:
-            fldName = _fieldTypes[type]
-            return ("(select valueForField(mid, flds, '%s') from notes "
-                    "where id = c.nid)" % fldName)
-        
-    for type, name in _fieldTypes.iteritems():
-        addCustomColumn(CustomColumn(
-            key = type,
-            name = name,
-            onData = fldOnData,
-            onSort = fldOnSort
-        ))
-    #---------
-    
+# Ensure other add-ons don't try to use this one until it has loaded.
 addHook("profileLoaded", onLoad)
-addHook("advBrowserLoad", onAdvBrowserLoad)
