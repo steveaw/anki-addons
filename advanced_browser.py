@@ -14,8 +14,8 @@ CONF_KEY = 'advbrowse_activeCols'
 origColumnData = DataModel.columnData
 origOrder = Finder._order
 
-# CustomColumn objects maintained by this add-on. Indexed by
-# CustomColumn.type.
+# CustomColumn objects maintained by this add-on.
+# {type -> CustomColumn}
 _customTypes = {}
 
 # Context menu items
@@ -114,15 +114,29 @@ def addContextItem(item):
 
     
 def myOnHeaderContext(self, pos):
+    """
+    Override the original onHeaderContext. We are responsible for
+    building the entire menu, so we include the original columns as
+    well.
+    """
     global _contextItems
     
     gpos = self.form.tableView.mapToGlobal(pos)
     main = QMenu()
     
-    # Let clients decide what columns to include before we build the menu
+    # Let clients decide what columns to include before we build the menu.
+    # Clear the global list first.
     _contextItems = []
+    
+    # We are also a client and we need to build the built-in columns first.
+    for item in self.columns:
+        type, name = item
+        if type not in _customTypes:
+            _contextItems.append(CustomColumn(type, name, None))
+    
+    # Now let clients do theirs.
     runHook("advBrowserBuildContext")
-      
+    
     
     def addCheckableAction(menu, type, name):
         a = menu.addAction(name)
@@ -130,19 +144,12 @@ def myOnHeaderContext(self, pos):
         a.setChecked(type in self.model.activeCols)
         a.connect(a, SIGNAL("toggled(bool)"),
                   lambda b, t=type: self.toggleField(t))
-
-    # Do the built-in ones normally. Ensure the ones we maintain aren't
-    # included.
-    for item in self.columns:
-        type, name = item
-        if type not in _customTypes:
-            addCheckableAction(main, type, name)
     
 
     # For some reason, sub menus aren't added if we don't keep a
     # reference to them until exec, so keep them in this list.
     tmp = []
-    # Ours might have sub-menus. Recursively add each item/group.
+    # Recursively add each item/group.
     def addToSubgroup(menu, items):
         for item in items:
             # TODO: this isn't great :(
@@ -150,10 +157,13 @@ def myOnHeaderContext(self, pos):
                 sub = QMenu(item.name)
                 tmp.append(sub)
                 menu.addMenu(sub)
+                # Sort sub-group before addding it
+                item.items.sort(key=lambda x: x.name) 
                 addToSubgroup(sub, item.items)
             else:
                 addCheckableAction(menu, item.type, item.name)
 
+    _contextItems.sort(key=lambda x: x.name) # Sub-groups aren't sorted yet
     addToSubgroup(main, _contextItems)
     main.exec_(gpos)
 
