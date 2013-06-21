@@ -33,31 +33,6 @@ _modelFieldPos = {}
 # collection to decide how to build the context menu.
 _customColumns = []
 
-# def myOnHeaderContext(self, pos):
-#     gpos = self.form.tableView.mapToGlobal(pos)
-#     
-#     m = QMenu()
-#     # Sub-menu containing every uniquely named field in the collection.
-#     fm = QMenu("Fields")
-#     
-#     def addCheckableAction(menu, type, name):
-#         a = menu.addAction(name)
-#         a.setCheckable(True)
-#         a.setChecked(type in self.model.activeCols)
-#         a.connect(a, SIGNAL("toggled(bool)"),
-#                   lambda b, t=type: self.toggleField(t))
-#     
-#     for item in self.columns:
-#         type, name = item
-#         if type in _fieldTypes:
-#             addCheckableAction(fm, type, name)
-#         else:
-#             addCheckableAction(m, type, name)
-#     
-#     m.addMenu(fm)
-#     m.exec_(gpos)
-
-
 def onLoad():
     # Create a new SQL function that we can use in our queries.
     mw.col.db._db.create_function("valueForField", 3, valueForField)
