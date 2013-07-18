@@ -6,10 +6,13 @@
 import time
 
 from aqt import *
-from anki.hooks import addHook
+from anki.hooks import addHook, wrap
+from aqt.browser import DataModel
 import advanced_browser
 
 # Some useful columns to have
+
+
 _usefulColumns = [('cfirst', "First review"),
                 ('clast', "Last review"),
                 ('cavtime', "Time (Average)"),
@@ -196,7 +199,27 @@ def onAdvBrowserLoad():
     for column in _customColumns:
         advanced_browser.addCustomColumn(column)
 
-    
+
+def dataForCustomColumns(self, index, role, _old):
+    """
+    Stop Qt.AlignHCenter text alignment being applied to any of the columns for
+    Note fields (which are typically text)
+    Need to use around wrapping so that we can stop the original method being called
+    if we handle it.
+    """
+    #Keep the original guard
+    if index.isValid():
+        if role == Qt.TextAlignmentRole:
+            align = Qt.AlignVCenter
+            if _fieldTypes.has_key(self.activeCols[index.column()]):
+                #align |= Qt.AlignHCenter
+                return align
+    #Defer to the original in all cases except those we explicitly matched
+    return _old(self, index, role)
+
+
+DataModel.data = wrap(DataModel.data, dataForCustomColumns, "around")
+
 addHook("profileLoaded", onLoad)
 addHook("advBrowserLoad", onAdvBrowserLoad)
 addHook("advBrowserBuildContext", onBuildContextMenu)
